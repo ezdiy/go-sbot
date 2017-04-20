@@ -154,7 +154,10 @@ func (f *Feed) AddMessage(m *SignedMessage) error {
 
 func (f *Feed) PublishMessage(body interface{}) error {
 	content, _ := json.Marshal(body)
+	return f.PublishMessageJSON(content)
+}
 
+func (f *Feed) PublishMessageJSON(content json.RawMessage) error {
 	m := &Message{
 		Author:    f.ID,
 		Timestamp: float64(time.Now().UnixNano() / int64(time.Millisecond)),
@@ -168,7 +171,7 @@ func (f *Feed) PublishMessage(body interface{}) error {
 		m.Previous = &key
 		m.Sequence = l.Sequence + 1
 		for m.Timestamp <= l.Timestamp {
-			m.Timestamp += 0.01
+			m.Timestamp += 1
 		}
 	}
 

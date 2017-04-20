@@ -19,14 +19,14 @@ import (
 )
 
 type Pub struct {
-	Link ssb.Ref `json:"link"`
 	Host string  `json:"host"`
 	Port int     `json:"port"`
+	Link ssb.Ref `json:"key"`
 }
 
 type PubAnnounce struct {
 	ssb.MessageBody
-	Pub Pub `json:"pub"`
+	Pub Pub `json:"address"`
 }
 
 
@@ -36,6 +36,7 @@ func AddPub(ds *ssb.DataStore, pb Pub) {
 		if err != nil {
 			return err
 		}
+		fmt.Println(pb)
 		buf, _ := json.Marshal(pb)
 		PubBucket.Put([]byte(pb.Link), buf)
 		return nil
@@ -43,6 +44,7 @@ func AddPub(ds *ssb.DataStore, pb Pub) {
 }
 
 func init() {
+	fmt.Println("init")
 	ssb.AddMessageHooks["gossip"] = func(m *ssb.SignedMessage, tx *bolt.Tx) error {
 		_, mb := m.DecodeMessage()
 		if mbp, ok := mb.(*PubAnnounce); ok {
@@ -52,6 +54,7 @@ func init() {
 			}
 			buf, _ := json.Marshal(mbp.Pub)
 			PubBucket.Put([]byte(mbp.Pub.Link), buf)
+			fmt.Println("Adding pub ", mbp.Pub.Link, mbp.Pub.Port, mbp.Pub.Host)
 			return nil
 		}
 		return nil
@@ -110,6 +113,7 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 		var pubList []*Pub
 		t := time.NewTicker(time.Duration(cps)*time.Second)
 		for range t.C {
+			fmt.Println("tick: ",len(pubList))
 			if len(conns) > limit {
 				continue
 			}
@@ -119,7 +123,6 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 			if len(pubList) == 0 {
 				continue
 			}
-			fmt.Println("tick: ",len(pubList))
 
 			pub := pubList[0]
 			pubList = pubList[1:]
@@ -171,7 +174,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
 		close(reply)
 	}()
 	for m := range reply {
-		fmt.Println("repl",m)
+		//fmt.Println("repl",m)
 		f.AddMessage(m)
 	}
 }
@@ -211,11 +214,11 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 
 func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
 	mux := InitMux(ds, conn, peer)
-	fmt.Println("Askin")
+	//fmt.Println("Askin")
 	AskForFeeds(ds, mux, peer)
-	fmt.Println("handling")
+	//fmt.Println("handling")
 	mux.Handle()
-	fmt.Println("handled")
+	//fmt.Println("handled")
 }
 
 
