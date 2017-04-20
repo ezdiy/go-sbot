@@ -86,12 +86,13 @@ func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int)
 						conns[caller] = false
 					}
 					lock.Unlock()
+					defer conn.Close()
 					if ok && is_client {
 						fmt.Println("Already talking to ", caller, " (we connected first), dropping")
+						return
 					} else {
 						handle(ds, conn, caller)
 					}
-					conn.Close()
 					lock.Lock()
 					delete(conns, caller)
 					lock.Unlock()
