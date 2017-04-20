@@ -3,7 +3,7 @@ package graph
 import (
 	"encoding/json"
 
-	".."
+	"github.com/ezdiy/go-ssb"
 	"github.com/boltdb/bolt"
 )
 
