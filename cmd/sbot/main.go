@@ -19,7 +19,7 @@ var datastore *ssb.DataStore
 
 func main() {
 	datastore, _ = ssb.OpenDataStore("feeds.db", "secret.json")
-	gossip.Replicate(datastore, nil)
+	gossip.Replicate(datastore, "0.0.0.0:2017")
 
 	bi := boltinspect.New(datastore.DB())
 

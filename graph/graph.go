@@ -51,10 +51,14 @@ func handleGraph(m *ssb.SignedMessage, tx *bolt.Tx) error {
 	}
 	return nil
 }
-
 func GetFollows(ds *ssb.DataStore, feed ssb.Ref, depth int) (follows map[ssb.Ref]int) {
 	follows = map[ssb.Ref]int{}
 	follows[feed] = 0
+	GetMultiFollows(ds, follows, depth)
+	return
+}
+
+func GetMultiFollows(ds *ssb.DataStore, follows map[ssb.Ref]int, depth int) (map[ssb.Ref]int) {
 	ds.DB().View(func(tx *bolt.Tx) error {
 		GraphBucket := tx.Bucket([]byte("graph"))
 		if GraphBucket == nil {
@@ -82,5 +86,6 @@ func GetFollows(ds *ssb.DataStore, feed ssb.Ref, depth int) (follows map[ssb.Ref
 		}
 		return nil
 	})
-	return
+	return follows
 }
+

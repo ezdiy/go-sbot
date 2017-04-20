@@ -24,6 +24,7 @@ type Message struct {
 }
 
 func Encode(i interface{}) ([]byte, error) {
+	fmt.Println(i)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)

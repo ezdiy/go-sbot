@@ -62,20 +62,24 @@ func init() {
 }
 
 type Handler func(*ssb.DataStore, net.Conn, ssb.Ref)
-func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int) {
+func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) {
 	var lock  sync.Mutex
 
 	// maps pub -> didweinitiate?
-	var conns map[ssb.Ref]bool
+	conns := make(map[ssb.Ref]bool)
 	sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 
-	if addr != nil {
+	if addr != "" {
 		go func() {
 			sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
-			listener, _ := sss.Listen("tcp", *addr)
+			listener, _ := sss.Listen("tcp", addr)
 			fmt.Println("Listening on ",addr)
 			for {
-				conn,_ := listener.Accept()
+				conn, err := listener.Accept()
+				if err != nil {
+					fmt.Println("error accepting connection: ",err)
+					continue
+				}
 				go func() {
 					caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
 					fmt.Println("Accepted connection from ", caller)
@@ -107,14 +111,15 @@ func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int)
 		t := time.NewTicker(time.Duration(cps)*time.Second)
 		for range t.C {
 			if len(conns) > limit {
-				return
+				continue
 			}
 			if len(pubList) == 0 {
 				pubList = GetPubs(ds)
 			}
 			if len(pubList) == 0 {
-				return
+				continue
 			}
+			fmt.Println("tick: ",len(pubList))
 
 			pub := pubList[0]
 			pubList = pubList[1:]
@@ -128,13 +133,18 @@ func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int)
 				if !ok { conns[pub.Link] = true }
 				lock.Unlock()
 				if ok { return }
+				fmt.Println("Connecting to ",pub)
 				d, err := ssc.NewDialer(pubKey)
-				if err != nil {
+				if err == nil {
 					conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
-					if err != nil {
+					if err == nil {
 						handle(ds, conn, pub.Link)
 						conn.Close()
+					} else {
+						fmt.Println("Conn failed",err)
 					}
+				} else {
+					fmt.Println("dialer failed", err)
 				}
 
 				lock.Lock();
@@ -152,37 +162,30 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
 	if f.Latest() != nil {
 		seq = f.Latest().Sequence + 1
 	}
-	fmt.Println("Asking for ", f.ID, seq)
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
 			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
 		if err != nil {
-			fmt.Println(err)
+			fmt.Println("err",err)
 		}
 		close(reply)
 	}()
 	for m := range reply {
+		fmt.Println("repl",m)
 		f.AddMessage(m)
 	}
 }
 
 func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
-	for feed := range graph.GetFollows(ds, ds.PrimaryRef, 2) {
+	for feed := range graph.GetMultiFollows(ds, map[ssb.Ref]int{peer:0, ds.PrimaryRef:0}, 2) {
 		go get_feed(ds, mux, feed)
-	}
-
-	theyfollow := graph.GetFollows(ds, peer, 2)
-	level, ok := theyfollow[ds.PrimaryRef]
-	if ok && level < 2 {
-		for feed := range theyfollow {
-			go get_feed(ds, mux, feed)
-		}
 	}
 }
 
 func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 	mux := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
 	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
+		fmt.Println("rm",rm)
 		params := struct {
 			Id   ssb.Ref `json:"id"`
 			Seq  int     `json:"seq"`
@@ -198,7 +201,11 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 		c := make(chan interface{})
 		go func() {
 			for m := range f.Log(params.Seq, params.Live) {
-				c <- m
+				if (m == nil) {
+					c <- map[string]bool{"sync": true}
+				} else {
+					c <- m
+				}
 			}
 			close(c)
 		}()
@@ -209,8 +216,11 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 
 func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
 	mux := InitMux(ds, conn, peer)
+	fmt.Println("Askin")
 	AskForFeeds(ds, mux, peer)
+	fmt.Println("handling")
 	mux.Handle()
+	fmt.Println("handled")
 }
 
 
@@ -231,7 +241,7 @@ func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 	return
 }
 
-func Replicate(ds *ssb.DataStore, addr *string) {
-	Gossip(ds, addr, Replicator, 5, 5)
+func Replicate(ds *ssb.DataStore, addr string) {
+	Gossip(ds, addr, Replicator, 1, 5)
 }
 
