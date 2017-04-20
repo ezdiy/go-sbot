@@ -11,11 +11,11 @@ import (
 
 	"github.com/boltdb/bolt"
 
-	".."
-	"../graph"
+	"github.com/ezdiy/go-ssb"
+	"github.com/ezdiy/go-ssb/graph"
 	"github.com/ezdiy/secretstream"
 	"github.com/go-kit/kit/log"
-	"github.com/ezdiy/muxrpc"
+	"github.com/ezdiy/go-muxrpc"
 )
 
 type Pub struct {

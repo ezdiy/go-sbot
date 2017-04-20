@@ -64,7 +64,7 @@ type Feed struct {
 	Topic *MessageTopic
 }
 
-func OpenDataStore(path string, primaryKey string) (*DataStore, error) {
+func OpenDataStore(path string, keypair *secrethandshake.EdKeyPair) (*DataStore, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func OpenDataStore(path string, primaryKey string) (*DataStore, error) {
 		extraData: map[string]interface{}{},
 		Keys:      map[Ref]Signer{},
 	}
-	ds.PrimaryKey, _ = secrethandshake.LoadSSBKeyPair(primaryKey)
+	ds.PrimaryKey = keypair
 	ds.PrimaryRef = Ref("@" + base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:]) + ".ed25519")
 	ds.Keys[Ref("@"+base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:])+".ed25519")] = &SignerEd25519{ed25519.PrivateKey(ds.PrimaryKey.Secret[:])}
 	return ds, nil
