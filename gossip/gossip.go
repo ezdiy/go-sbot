@@ -205,6 +205,7 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
 	mux := InitMux(ds, conn, peer)
 	AskForFeeds(ds, mux, peer)
+	mux.Handle()
 }
 
 
