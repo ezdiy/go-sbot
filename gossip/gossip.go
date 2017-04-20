@@ -185,7 +185,7 @@ func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
 func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 	mux := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
 	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
-		fmt.Println("rm",rm)
+		fmt.Println("rm",string(rm[:]))
 		params := struct {
 			Id   ssb.Ref `json:"id"`
 			Seq  int     `json:"seq"`

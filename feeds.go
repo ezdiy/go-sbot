@@ -244,20 +244,17 @@ func (f *Feed) Log(seq int, live bool) chan *SignedMessage {
 			}
 			return nil
 		})
-		fmt.Println("doing",err,live)
 		if err != nil {
 			return
 		}
-		if live {
-			fmt.Println("synced")
-			c <- nil
-		}
-		for m := range liveChan {
-			if m.Sequence < seq {
-				continue
+		if (live) {
+			for m := range liveChan {
+				if m.Sequence < seq {
+					continue
+				}
+				seq = m.Sequence
+				c <- m
 			}
-			seq = m.Sequence
-			c <- m
 		}
 		close(c)
 	}()
