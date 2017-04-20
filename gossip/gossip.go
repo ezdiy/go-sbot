@@ -64,6 +64,8 @@ func init() {
 type Handler func(*ssb.DataStore, net.Conn, ssb.Ref)
 func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int) {
 	var lock  sync.Mutex
+
+	// maps pub -> didweinitiate?
 	var conns map[ssb.Ref]bool
 	sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 
@@ -74,24 +76,26 @@ func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int)
 			fmt.Println("Listening on ",addr)
 			for {
 				conn,_ := listener.Accept()
-				caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
-				fmt.Println("Accepted connection from ", caller)
+				go func() {
+					caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
+					fmt.Println("Accepted connection from ", caller)
 
-				lock.Lock();
-				is_client, ok := conns[caller]
-				if !ok {
-					conns[caller] = false
-				}
-				lock.Unlock()
-				if ok && is_client {
-					fmt.Println("Already talking to ", caller, " (we connected first), dropping")
-				} else {
-					handle(ds, conn, caller)
-				}
-				conn.Close()
-				lock.Lock();
-				delete(conns, caller)
-				lock.Unlock()
+					lock.Lock()
+					is_client, ok := conns[caller]
+					if !ok {
+						conns[caller] = false
+					}
+					lock.Unlock()
+					if ok && is_client {
+						fmt.Println("Already talking to ", caller, " (we connected first), dropping")
+					} else {
+						handle(ds, conn, caller)
+					}
+					conn.Close()
+					lock.Lock()
+					delete(conns, caller)
+					lock.Unlock()
+				}()
 			}
 		}()
 	}
