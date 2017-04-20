@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"net"
 
 	"github.com/boltdb/bolt"
 
@@ -27,6 +28,7 @@ type PubAnnounce struct {
 	ssb.MessageBody
 	Pub Pub `json:"pub"`
 }
+
 
 func AddPub(ds *ssb.DataStore, pb Pub) {
 	ds.DB().Update(func(tx *bolt.Tx) error {
@@ -59,116 +61,152 @@ func init() {
 	}
 }
 
-type ExtraData struct {
-	lock  sync.Mutex
-	conns map[ssb.Ref]*muxrpc.Client
-}
+type Handler func(*ssb.DataStore, net.Conn, ssb.Ref)
+func Gossip(ds *ssb.DataStore, addr *string, handle Handler, cps int, limit int) {
+	var lock  sync.Mutex
+	var conns map[ssb.Ref]bool
+	sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 
-func Replicate(ds *ssb.DataStore) {
-	ed := &ExtraData{conns: map[ssb.Ref]*muxrpc.Client{}}
-	ds.SetExtraData("gossip", ed)
+	if addr != nil {
+		go func() {
+			sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
+			listener, _ := sss.Listen("tcp", *addr)
+			fmt.Println("Listening on ",addr)
+			for {
+				conn,_ := listener.Accept()
+				caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
+				fmt.Println("Accepted connection from ", caller)
+
+				lock.Lock();
+				is_client, ok := conns[caller]
+				if !ok {
+					conns[caller] = false
+				}
+				lock.Unlock()
+				if ok && is_client {
+					fmt.Println("Already talking to ", caller, " (we connected first), dropping")
+				} else {
+					handle(ds, conn, caller)
+				}
+				conn.Close()
+				lock.Lock();
+				delete(conns, caller)
+				lock.Unlock()
+			}
+		}()
+	}
 
 	go func() {
-		sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 		ssc, _ := secretstream.NewClient(*ds.PrimaryKey, sbotAppKey)
-		pubList := GetPubs(ds)
-		t := time.NewTicker(10 * time.Second)
+		var pubList []*Pub
+		t := time.NewTicker(time.Duration(cps)*time.Second)
 		for range t.C {
-			func() {
-				ed.lock.Lock()
-				defer ed.lock.Unlock()
+			if len(conns) > limit {
+				return
+			}
+			if len(pubList) == 0 {
+				pubList = GetPubs(ds)
+			}
+			if len(pubList) == 0 {
+				return
+			}
 
-				fmt.Println("tick")
-				if len(pubList) == 0 {
-					pubList = GetPubs(ds)
-				}
-				if len(pubList) == 0 {
-					return
-				}
-				pub := pubList[0]
-				pubList = pubList[1:]
+			pub := pubList[0]
+			pubList = pubList[1:]
+			var pubKey [32]byte
+			rawpubKey := pub.Link.Raw()
+			copy(pubKey[:], rawpubKey)
 
-				if _, ok := ed.conns[pub.Link]; ok {
-					return
-				}
-
-				var pubKey [32]byte
-				rawpubKey := pub.Link.Raw()
-				copy(pubKey[:], rawpubKey)
-
+			go func() {
+				lock.Lock();
+				_, ok := conns[pub.Link]
+				if !ok { conns[pub.Link] = true }
+				lock.Unlock()
+				if ok { return }
 				d, err := ssc.NewDialer(pubKey)
 				if err != nil {
-					return
-				}
-				fmt.Println("Connecting to ", pub)
-				conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-
-				muxConn := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
-
-				ed.conns[pub.Link] = muxConn
-
-				muxConn.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
-					params := struct {
-						Id   ssb.Ref `json:"id"`
-						Seq  int     `json:"seq"`
-						Live bool    `json:"live"`
-					}{
-						"",
-						0,
-						false,
+					conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
+					if err != nil {
+						handle(ds, conn, pub.Link)
+						conn.Close()
 					}
-					args := []interface{}{&params}
-					json.Unmarshal(rm, &args)
-					f := ds.GetFeed(params.Id)
-					if f.ID == ds.PrimaryRef {
-						fmt.Println(params)
-					}
-					c := make(chan interface{})
-					go func() {
-						for m := range f.Log(params.Seq, params.Live) {
-							c <- m
-						}
-						close(c)
-					}()
-					return c
-				})
-
-				go func() {
-					muxConn.Handle()
-					ed.lock.Lock()
-					defer ed.lock.Unlock()
-					delete(ed.conns, pub.Link)
-				}()
-
-				for feed := range graph.GetFollows(ds, ds.PrimaryRef, 2) {
-					go func(feed ssb.Ref) {
-						reply := make(chan *ssb.SignedMessage)
-						f := ds.GetFeed(feed)
-						seq := 0
-						if f.Latest() != nil {
-							seq = f.Latest().Sequence + 1
-						}
-						fmt.Println("Asking for ", f.ID, seq)
-						go func() {
-							err := muxConn.Source("createHistoryStream", reply, map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
-							if err != nil {
-								fmt.Println(err)
-							}
-							close(reply)
-						}()
-						for m := range reply {
-							f.AddMessage(m)
-						}
-					}(feed)
 				}
+
+				lock.Lock();
+				delete(conns, pub.Link)
+				lock.Unlock()
 			}()
 		}
 	}()
 }
+
+func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
+	reply := make(chan *ssb.SignedMessage)
+	f := ds.GetFeed(feed)
+	seq := 0
+	if f.Latest() != nil {
+		seq = f.Latest().Sequence + 1
+	}
+	fmt.Println("Asking for ", f.ID, seq)
+	go func() {
+		err := mux.Source("createHistoryStream", reply,
+			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
+		if err != nil {
+			fmt.Println(err)
+		}
+		close(reply)
+	}()
+	for m := range reply {
+		f.AddMessage(m)
+	}
+}
+
+func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
+	for feed := range graph.GetFollows(ds, ds.PrimaryRef, 2) {
+		go get_feed(ds, mux, feed)
+	}
+
+	theyfollow := graph.GetFollows(ds, peer, 2)
+	level, ok := theyfollow[ds.PrimaryRef]
+	if ok && level < 2 {
+		for feed := range theyfollow {
+			go get_feed(ds, mux, feed)
+		}
+	}
+}
+
+func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
+	mux := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
+	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
+		params := struct {
+			Id   ssb.Ref `json:"id"`
+			Seq  int     `json:"seq"`
+			Live bool    `json:"live"`
+		}{
+			"",
+			0,
+			false,
+		}
+		args := []interface{}{&params}
+		json.Unmarshal(rm, &args)
+		f := ds.GetFeed(params.Id)
+		c := make(chan interface{})
+		go func() {
+			for m := range f.Log(params.Seq, params.Live) {
+				c <- m
+			}
+			close(c)
+		}()
+		return c
+	})
+	return mux
+}
+
+func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
+	mux := InitMux(ds, conn, peer)
+	AskForFeeds(ds, mux, peer)
+}
+
 
 func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 	ds.DB().View(func(tx *bolt.Tx) error {
@@ -186,3 +224,8 @@ func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 	})
 	return
 }
+
+func Replicate(ds *ssb.DataStore, addr *string) {
+	Gossip(ds, addr, Replicator, 5, 5)
+}
+
