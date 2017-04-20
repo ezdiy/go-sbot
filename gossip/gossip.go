@@ -201,13 +201,8 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 		c := make(chan interface{})
 		go func() {
 			for m := range f.Log(params.Seq, params.Live) {
-				if (m == nil) {
-					c <- map[string]bool{"sync": true}
-				} else {
-					c <- m
-				}
+				c <- m
 			}
-			close(c)
 		}()
 		return c
 	})
