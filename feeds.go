@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/boltdb/bolt"
-	"github.com/cryptix/secretstream/secrethandshake"
+	"github.com/ezdiy/secretstream/secrethandshake"
 	"golang.org/x/crypto/ed25519"
 )
 
