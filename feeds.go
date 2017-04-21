@@ -121,48 +121,47 @@ func (f *Feed) AddMessage(m *SignedMessage) error {
 	if err != nil {
 		return err
 	}
-	err = f.store.db.Batch(func(tx *bolt.Tx) error {
-		FeedsBucket, err := tx.CreateBucketIfNotExists([]byte("feeds"))
-		if err != nil {
-			return err
-		}
-		FeedBucket, err := FeedsBucket.CreateBucketIfNotExists([]byte(f.ID))
-		FeedBucket.FillPercent = 1
-		if err != nil {
-			return err
-		}
-		buf, err := Encode(m)
-		if err != nil {
-			return err
-		}
-		FeedBucket.Put(itob(m.Sequence), buf)
-		LogBucket, err := tx.CreateBucketIfNotExists([]byte("log"))
-		LogBucket.FillPercent = 1
-		if err != nil {
-			return err
-		}
-		seq, err := LogBucket.NextSequence()
-		if err != nil {
-			return err
-		}
-		LogBucket.Put(itob(int(seq)), []byte(m.Key()))
-		OwnerBucket, err := tx.CreateBucketIfNotExists([]byte("owner"))
-		if err != nil {
-			return err
-		}
-		OwnerBucket.Put([]byte(m.Key()), []byte(m.Author))
-		// CAREFUL: Hooks must be thread safe now
-		for _, hook := range AddMessageHooks {
-			err = hook(m, tx)
+	go func() {
+		f.store.db.Batch(func(tx *bolt.Tx) error {
+			FeedsBucket, err := tx.CreateBucketIfNotExists([]byte("feeds"))
 			if err != nil {
 				return err
 			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
+			FeedBucket, err := FeedsBucket.CreateBucketIfNotExists([]byte(f.ID))
+			FeedBucket.FillPercent = 1
+			if err != nil {
+				return err
+			}
+			buf, err := Encode(m)
+			if err != nil {
+				return err
+			}
+			FeedBucket.Put(itob(m.Sequence), buf)
+			LogBucket, err := tx.CreateBucketIfNotExists([]byte("log"))
+			LogBucket.FillPercent = 1
+			if err != nil {
+				return err
+			}
+			seq, err := LogBucket.NextSequence()
+			if err != nil {
+				return err
+			}
+			LogBucket.Put(itob(int(seq)), []byte(m.Key()))
+			OwnerBucket, err := tx.CreateBucketIfNotExists([]byte("owner"))
+			if err != nil {
+				return err
+			}
+			OwnerBucket.Put([]byte(m.Key()), []byte(m.Author))
+			// CAREFUL: Hooks must be thread safe now
+			for _, hook := range AddMessageHooks {
+				err = hook(m, tx)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}()
 	f.SetLatest(m)
 	f.Topic.Send <- m
 	return nil

@@ -156,11 +156,11 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 }
 
 func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref) {
-	reply := make(chan *ssb.SignedMessage)
 	f := ds.GetFeed(feed)
 	if f == nil {
-		ds.Log.Log("getfeed", peer, "invalid", feed)
+		return
 	}
+	reply := make(chan *ssb.SignedMessage)
 	seq := 0
 	if f.Latest() != nil {
 		seq = f.LatestCommited().Sequence + 1
@@ -174,7 +174,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 		close(reply)
 	}()
 	for m := range reply {
-		go f.AddMessage(m)
+		f.AddMessage(m)
 	}
 }
 
