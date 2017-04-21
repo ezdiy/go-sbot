@@ -2,6 +2,7 @@ package ssb
 
 import (
 	"os"
+	"sync/atomic"
 	"github.com/go-kit/kit/log"
 	"encoding/base64"
 	"encoding/binary"
@@ -31,6 +32,8 @@ type DataStore struct {
 
 	feedlock sync.Mutex
 	feeds    map[Ref]*Feed
+	pending map[*Feed]int
+	feedq chan *SignedMessage
 
 	Topic *MessageTopic
 
@@ -63,13 +66,98 @@ func (ds *DataStore) DB() *bolt.DB {
 type Feed struct {
 	store *DataStore
 	ID    Ref
-
-	lock sync.Mutex
-	last *SignedMessage
 	Topic *MessageTopic
+
+	latest atomic.Value
+	queue []*SignedMessage
 }
 
-func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPair) (*DataStore, error) {
+func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
+	q := f.queue
+	ds := f.store
+	last := f.Latest()
+	latest := last
+	var l log.Logger
+	if last == nil {
+		l = log.With(ds.Log, "commit", f.ID)
+	} else {
+		l = log.With(ds.Log, "commit", f.ID, "lseq", last.Sequence, "lts", last.Timestamp, "lhash", last.Key())
+	}
+
+	//check hash-commited chain
+	idx := -1
+	for i := 0; i < n; i++ {
+		m := q[i]
+		if (m.Author != f.ID) {
+			panic("m.Author == feed.ID invariant violation")
+		}
+		if !m.Verify(l, last) {
+			continue
+		}
+		idx = i
+		last = m
+	}
+
+	//now tip sig
+	if (last != latest) {
+		err := last.VerifySignature()
+		if err != nil { // fallback
+			last = latest
+			for ;idx > 0; idx-- {
+				if q[idx].VerifySignature() != nil {
+					last = q[idx]
+					break
+				}
+			}
+		}
+	}
+
+	// TODO:
+	// break above into pre-commit (parallel) and following into commit (ordered)
+	if (last != latest) {
+		f.latest.Store(last)
+		feed := feeds.Bucket([]byte(f.ID))
+		for i := 0; i < idx; i++ {
+			m := q[i]
+			buf, _ := Encode(m)
+			for _, hook := range AddMessageHooks {
+				hook(m, tx)
+			}
+			if (m.Sequence == 1) {
+				f.store.Log.Log("newfeed", m.Author)
+			}
+			feed.Put(itob(m.Sequence), buf)
+			f.Topic.Send <- m
+		}
+	}
+
+	//f.queue = q[n:]
+	copy(q, q[n:])
+	f.queue = q[:len(q)-n]
+}
+
+func (ds *DataStore) feed_collector(txint int) {
+	for {
+		select {
+		case m := <-ds.feedq:
+			f := ds.GetFeed(m.Author) // Sender verifies author!
+			pending, _ := ds.pending[f]
+			ds.pending[f] = pending+1
+			f.queue = append(f.queue, m)
+		case <-time.After(time.Duration(txint) * time.Millisecond):
+			ds.db.Update(func(tx *bolt.Tx) error {
+				feeds := tx.Bucket([]byte("feeds"))
+				for f, npend := range ds.pending {
+					f.Commit(tx, feeds, npend)
+					delete(ds.pending, f)
+				}
+				return nil
+			})
+		}
+	}
+}
+
+func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPair, txint int) (*DataStore, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -77,18 +165,23 @@ func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPai
 	ds := &DataStore{
 		db:        db,
 		feeds:     map[Ref]*Feed{},
+		pending:   map[*Feed]int{},
 		Topic:     NewMessageTopic(),
 		extraData: map[string]interface{}{},
 		Keys:      map[Ref]Signer{},
+		PrimaryKey: keypair,
 	}
 	if l == nil {
 		ds.Log = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	} else {
 		ds.Log = *l
 	}
-	ds.PrimaryKey = keypair
 	ds.PrimaryRef = Ref("@" + base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:]) + ".ed25519")
 	ds.Keys[Ref("@"+base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:])+".ed25519")] = &SignerEd25519{ed25519.PrivateKey(ds.PrimaryKey.Secret[:])}
+	if txint < 10 {
+		txint = 100
+	}
+	go ds.feed_collector(txint)
 	return ds, nil
 }
 
@@ -102,69 +195,36 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 		ds.Log.Log("feed", feedID, "error", "invalid ref")
 		return nil
 	}
-	ds.Log.Log("feed", feedID)
 	feed := &Feed{store: ds, ID: feedID, Topic: NewMessageTopic()}
-	feed.SetLatest(feed.LatestCommited())
 	feed.Topic.Register(ds.Topic.Send, true)
 	ds.feeds[feedID] = feed
+
+	ds.db.Update(func(tx *bolt.Tx) error {
+		feeds, _ := tx.CreateBucketIfNotExists([]byte("feeds"))
+		fb, _ := feeds.CreateBucketIfNotExists([]byte(feed.ID))
+		fb.FillPercent = 1
+		return nil
+	})
+	feed.latest.Store(feed.LatestCommited())
 	return feed
 }
 
 var AddMessageHooks = map[string]func(m *SignedMessage, tx *bolt.Tx) error{}
 
-// thread-safe
+func (ds *DataStore) AddMessage(m *SignedMessage) error {
+	ds.feedq <- m
+	return nil
+}
+
+func (f *Feed) Latest() (m *SignedMessage) {
+	return f.latest.Load().(*SignedMessage)
+}
+
 func (f *Feed) AddMessage(m *SignedMessage) error {
 	if m.Author != f.ID {
 		return fmt.Errorf("Wrong feed")
 	}
-	err := m.Verify(f)
-	if err != nil {
-		return err
-	}
-	go func() {
-		f.store.db.Batch(func(tx *bolt.Tx) error {
-			FeedsBucket, err := tx.CreateBucketIfNotExists([]byte("feeds"))
-			if err != nil {
-				return err
-			}
-			FeedBucket, err := FeedsBucket.CreateBucketIfNotExists([]byte(f.ID))
-			FeedBucket.FillPercent = 1
-			if err != nil {
-				return err
-			}
-			buf, err := Encode(m)
-			if err != nil {
-				return err
-			}
-			FeedBucket.Put(itob(m.Sequence), buf)
-			LogBucket, err := tx.CreateBucketIfNotExists([]byte("log"))
-			LogBucket.FillPercent = 1
-			if err != nil {
-				return err
-			}
-			seq, err := LogBucket.NextSequence()
-			if err != nil {
-				return err
-			}
-			LogBucket.Put(itob(int(seq)), []byte(m.Key()))
-			OwnerBucket, err := tx.CreateBucketIfNotExists([]byte("owner"))
-			if err != nil {
-				return err
-			}
-			OwnerBucket.Put([]byte(m.Key()), []byte(m.Author))
-			// CAREFUL: Hooks must be thread safe now
-			for _, hook := range AddMessageHooks {
-				err = hook(m, tx)
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-	}()
-	f.SetLatest(m)
-	f.Topic.Send <- m
-	return nil
+	return f.store.AddMessage(m)
 }
 
 func (f *Feed) PublishMessage(body interface{}) error {
@@ -221,20 +281,6 @@ func (f *Feed) LatestCommited() (m *SignedMessage) {
        })
        return
 }
-
-func (f *Feed) Latest() (m *SignedMessage) {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-	return f.last
-}
-
-func (f *Feed) SetLatest(m *SignedMessage) {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-	f.last = m
-}
-
-
 
 var ErrLogClosed = errors.New("LogClosed")
 

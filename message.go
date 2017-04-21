@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"strings"
+	"github.com/go-kit/kit/log"
 )
 
 type SignedMessage struct {
@@ -36,26 +36,29 @@ func Encode(i interface{}) ([]byte, error) {
 	return bytes.Trim(buf.Bytes(), "\n"), nil
 }
 
-func (m *SignedMessage) Verify(f *Feed) error {
-	latest := f.Latest()
+func (m *SignedMessage) Verify(l log.Logger, latest *SignedMessage) bool {
 	if latest == nil && m.Sequence == 1 {
-		return nil
+		return true
 	}
 	if m.Previous == nil && latest == nil {
-		return nil
+		return true
 	}
 	if m.Previous == nil && latest != nil {
-		return fmt.Errorf("Error: expected previous %s but found %s", latest.Key(), "")
+		l.Log("verifyerror", "malformed", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		return false
+	} else if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
+		l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+	} else if *m.Previous != latest.Key() {
+		l.Log("verifyerror", "fork", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		return false
 	}
-	if *m.Previous != latest.Key() {
-		return fmt.Errorf("Error: expected previous %s but found %s", latest.Key(), *m.Previous)
-	}
-	if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
-		return fmt.Errorf("Error: out of order")
-	}
+	return false
+}
+
+func (m *SignedMessage) VerifySignature() error {
 	buf, err := Encode(m.Message)
 	if err != nil {
-		return err
+		return nil
 	}
 	err = m.Signature.Verify(buf, m.Author)
 	if err != nil {

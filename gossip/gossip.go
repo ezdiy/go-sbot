@@ -172,11 +172,8 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 	}
 	reply := make(chan *ssb.SignedMessage)
 	seq := 0
-	if f.Latest() != nil {
-		m := f.LatestCommited()
-		if m != nil {
-			seq = m.Sequence + 1
-		}
+	if m := f.Latest(); m != nil {
+		seq = m.Sequence + 1
 	}
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
