@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"runtime"
 	"fmt"
 	"github.com/pkg/errors"
 	"time"
@@ -107,6 +108,15 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 	}
 
 	go func() {
+		t := time.NewTicker(time.Duration(10)*time.Second)
+		for range t.C {
+			ds.Log.Log("gc","start")
+			runtime.GC()
+			ds.Log.Log("gc","stop")
+		}
+	}()
+
+	go func() {
 		ssc, _ := secretstream.NewClient(*ds.PrimaryKey, sbotAppKey)
 		var pubList []*Pub
 		t := time.NewTicker(time.Duration(cps)*time.Second)
@@ -163,7 +173,10 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 	reply := make(chan *ssb.SignedMessage)
 	seq := 0
 	if f.Latest() != nil {
-		seq = f.LatestCommited().Sequence + 1
+		m := f.LatestCommited()
+		if m != nil {
+			seq = m.Sequence + 1
+		}
 	}
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
@@ -235,6 +248,6 @@ func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 }
 
 func Replicate(ds *ssb.DataStore, addr string) {
-	Gossip(ds, addr, Replicator, 3, 50)
+	Gossip(ds, addr, Replicator, 1, 100)
 }
 
