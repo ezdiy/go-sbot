@@ -1,6 +1,9 @@
 package gossip
 
 import (
+	"fmt"
+	"github.com/pkg/errors"
+	"time"
 	"encoding/base64"
 	"encoding/json"
 	"sync"
@@ -11,8 +14,8 @@ import (
 	"github.com/ezdiy/go-ssb"
 	"github.com/ezdiy/go-ssb/graph"
 	"github.com/ezdiy/secretstream"
-	"github.com/go-kit/kit/log"
 	"github.com/ezdiy/go-muxrpc"
+	"github.com/go-kit/kit/log"
 )
 
 type Pub struct {
@@ -61,6 +64,8 @@ func init() {
 type Handler func(*ssb.DataStore, net.Conn, ssb.Ref)
 func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) {
 	var lock  sync.Mutex
+	netin := log.With(ds.Log, "gossip", "incoming")
+	netout := log.With(ds.Log, "gossip", "outgoing")
 
 	// maps pub -> didweinitiate?
 	conns := make(map[ssb.Ref]bool)
@@ -70,6 +75,7 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 		go func() {
 			sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
 			listener, _ := sss.Listen("tcp", addr)
+			netin.Log("Listening on ",addr)
 			for {
 				conn, err := listener.Accept()
 				if err != nil {
@@ -85,13 +91,16 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 					lock.Unlock()
 					defer conn.Close()
 					if ok && is_client {
+						netin.Log("already", caller)
 						return
 					} else {
+						netin.Log("accept", caller)
 						handle(ds, conn, caller)
 					}
 					lock.Lock()
 					delete(conns, caller)
 					lock.Unlock()
+					netin.Log("disconnect", caller)
 				}()
 			}
 		}()
@@ -128,21 +137,30 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 				if err == nil {
 					conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
 					if err == nil {
+						netout.Log("connect", pub.Link)
 						handle(ds, conn, pub.Link)
 						conn.Close()
+					} else {
+						netout.Log("connect",pub.Link,"error", errors.Wrap(err, "dialer: can't dial"))
 					}
+				} else {
+					netout.Log("connect",pub.Link,"error", errors.Wrap(err, "shs: can't build dialer"))
 				}
 				lock.Lock();
 				delete(conns, pub.Link)
 				lock.Unlock()
+				netout.Log("disconnect", pub.Link)
 			}()
 		}
 	}()
 }
 
-func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
+func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref) {
 	reply := make(chan *ssb.SignedMessage)
 	f := ds.GetFeed(feed)
+	if f == nil {
+		ds.Log.Log("getfeed", peer, "invalid", feed)
+	}
 	seq := 0
 	if f.Latest() != nil {
 		seq = f.Latest().Sequence + 1
@@ -150,6 +168,9 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
 			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
+		if err != nil {
+			ds.Log.Log("getfeed", feed, "error", err)
+		}
 		close(reply)
 	}()
 	for m := range reply {
@@ -159,14 +180,13 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
 
 func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
 	for feed := range graph.GetMultiFollows(ds, map[ssb.Ref]int{peer:0, ds.PrimaryRef:0}, 2) {
-		go get_feed(ds, mux, feed)
+		go get_feed(ds, mux, feed, peer)
 	}
 }
 
 func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
-	mux := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
+	mux := muxrpc.NewClient(ds.Log, conn)
 	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
-		//fmt.Println("rm",string(rm[:]))
 		params := struct {
 			Id   ssb.Ref `json:"id"`
 			Seq  int     `json:"seq"`

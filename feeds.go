@@ -1,6 +1,8 @@
 package ssb
 
 import (
+	"os"
+	"github.com/go-kit/kit/log"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -37,6 +39,7 @@ type DataStore struct {
 
 	extraData     map[string]interface{}
 	extraDataLock sync.Mutex
+	Log log.Logger
 
 	Keys map[Ref]Signer
 }
@@ -64,7 +67,7 @@ type Feed struct {
 	Topic *MessageTopic
 }
 
-func OpenDataStore(path string, keypair *secrethandshake.EdKeyPair) (*DataStore, error) {
+func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPair) (*DataStore, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -75,6 +78,11 @@ func OpenDataStore(path string, keypair *secrethandshake.EdKeyPair) (*DataStore,
 		Topic:     NewMessageTopic(),
 		extraData: map[string]interface{}{},
 		Keys:      map[Ref]Signer{},
+	}
+	if l == nil {
+		ds.Log = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	} else {
+		ds.Log = *l
 	}
 	ds.PrimaryKey = keypair
 	ds.PrimaryRef = Ref("@" + base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:]) + ".ed25519")
@@ -89,8 +97,10 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 		return feed
 	}
 	if feedID.Type() != RefFeed {
+		ds.Log.Log("feed", feedID, "error", "invalid ref")
 		return nil
 	}
+	ds.Log.Log("feed", feedID)
 	feed := &Feed{store: ds, ID: feedID, Topic: NewMessageTopic()}
 	feed.Topic.Register(ds.Topic.Send, true)
 	ds.feeds[feedID] = feed
