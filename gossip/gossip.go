@@ -3,10 +3,7 @@ package gossip
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"os"
 	"sync"
-	"time"
 	"net"
 
 	"github.com/boltdb/bolt"
@@ -36,7 +33,6 @@ func AddPub(ds *ssb.DataStore, pb Pub) {
 		if err != nil {
 			return err
 		}
-		fmt.Println(pb)
 		buf, _ := json.Marshal(pb)
 		PubBucket.Put([]byte(pb.Link), buf)
 		return nil
@@ -44,7 +40,6 @@ func AddPub(ds *ssb.DataStore, pb Pub) {
 }
 
 func init() {
-	fmt.Println("init")
 	ssb.AddMessageHooks["gossip"] = func(m *ssb.SignedMessage, tx *bolt.Tx) error {
 		_, mb := m.DecodeMessage()
 		if mbp, ok := mb.(*PubAnnounce); ok {
@@ -54,7 +49,6 @@ func init() {
 			}
 			buf, _ := json.Marshal(mbp.Pub)
 			PubBucket.Put([]byte(mbp.Pub.Link), buf)
-			fmt.Println("Adding pub ", mbp.Pub.Link, mbp.Pub.Port, mbp.Pub.Host)
 			return nil
 		}
 		return nil
@@ -76,17 +70,13 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 		go func() {
 			sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
 			listener, _ := sss.Listen("tcp", addr)
-			fmt.Println("Listening on ",addr)
 			for {
 				conn, err := listener.Accept()
 				if err != nil {
-					fmt.Println("error accepting connection: ",err)
 					continue
 				}
 				go func() {
 					caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
-					fmt.Println("Accepted connection from ", caller)
-
 					lock.Lock()
 					is_client, ok := conns[caller]
 					if !ok {
@@ -95,7 +85,6 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 					lock.Unlock()
 					defer conn.Close()
 					if ok && is_client {
-						fmt.Println("Already talking to ", caller, " (we connected first), dropping")
 						return
 					} else {
 						handle(ds, conn, caller)
@@ -113,7 +102,6 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 		var pubList []*Pub
 		t := time.NewTicker(time.Duration(cps)*time.Second)
 		for range t.C {
-			fmt.Println("tick: ",len(pubList))
 			if len(conns) > limit {
 				continue
 			}
@@ -136,20 +124,14 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 				if !ok { conns[pub.Link] = true }
 				lock.Unlock()
 				if ok { return }
-				fmt.Println("Connecting to ",pub)
 				d, err := ssc.NewDialer(pubKey)
 				if err == nil {
 					conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
 					if err == nil {
 						handle(ds, conn, pub.Link)
 						conn.Close()
-					} else {
-						fmt.Println("Conn failed",err)
 					}
-				} else {
-					fmt.Println("dialer failed", err)
 				}
-
 				lock.Lock();
 				delete(conns, pub.Link)
 				lock.Unlock()
@@ -168,13 +150,9 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref) {
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
 			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
-		if err != nil {
-			fmt.Println("err",err)
-		}
 		close(reply)
 	}()
 	for m := range reply {
-		//fmt.Println("repl",m)
 		f.AddMessage(m)
 	}
 }
@@ -188,7 +166,7 @@ func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
 func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 	mux := muxrpc.NewClient(log.NewLogfmtLogger(log.NewSyncWriter(os.Stdout)), conn)
 	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
-		fmt.Println("rm",string(rm[:]))
+		//fmt.Println("rm",string(rm[:]))
 		params := struct {
 			Id   ssb.Ref `json:"id"`
 			Seq  int     `json:"seq"`
@@ -214,11 +192,8 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 
 func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
 	mux := InitMux(ds, conn, peer)
-	//fmt.Println("Askin")
 	AskForFeeds(ds, mux, peer)
-	//fmt.Println("handling")
 	mux.Handle()
-	//fmt.Println("handled")
 }
 
 
@@ -240,6 +215,6 @@ func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 }
 
 func Replicate(ds *ssb.DataStore, addr string) {
-	Gossip(ds, addr, Replicator, 1, 5)
+	Gossip(ds, addr, Replicator, 3, 5)
 }
 
