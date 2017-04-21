@@ -163,7 +163,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 	}
 	seq := 0
 	if f.Latest() != nil {
-		seq = f.Latest().Sequence + 1
+		seq = f.LatestCommited().Sequence + 1
 	}
 	go func() {
 		err := mux.Source("createHistoryStream", reply,
@@ -174,7 +174,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 		close(reply)
 	}()
 	for m := range reply {
-		f.AddMessage(m)
+		go f.AddMessage(m)
 	}
 }
 
@@ -235,6 +235,6 @@ func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
 }
 
 func Replicate(ds *ssb.DataStore, addr string) {
-	Gossip(ds, addr, Replicator, 3, 5)
+	Gossip(ds, addr, Replicator, 3, 50)
 }
 

@@ -37,14 +37,6 @@ func Encode(i interface{}) ([]byte, error) {
 }
 
 func (m *SignedMessage) Verify(f *Feed) error {
-	buf, err := Encode(m.Message)
-	if err != nil {
-		return err
-	}
-	err = m.Signature.Verify(buf, m.Author)
-	if err != nil {
-		return err
-	}
 	latest := f.Latest()
 	if latest == nil && m.Sequence == 1 {
 		return nil
@@ -60,6 +52,14 @@ func (m *SignedMessage) Verify(f *Feed) error {
 	}
 	if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
 		return fmt.Errorf("Error: out of order")
+	}
+	buf, err := Encode(m.Message)
+	if err != nil {
+		return err
+	}
+	err = m.Signature.Verify(buf, m.Author)
+	if err != nil {
+		return err
 	}
 	return nil
 }

@@ -64,6 +64,8 @@ type Feed struct {
 	store *DataStore
 	ID    Ref
 
+	lock sync.Mutex
+	last *SignedMessage
 	Topic *MessageTopic
 }
 
@@ -102,6 +104,7 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 	}
 	ds.Log.Log("feed", feedID)
 	feed := &Feed{store: ds, ID: feedID, Topic: NewMessageTopic()}
+	feed.SetLatest(feed.LatestCommited())
 	feed.Topic.Register(ds.Topic.Send, true)
 	ds.feeds[feedID] = feed
 	return feed
@@ -109,6 +112,7 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 
 var AddMessageHooks = map[string]func(m *SignedMessage, tx *bolt.Tx) error{}
 
+// thread-safe
 func (f *Feed) AddMessage(m *SignedMessage) error {
 	if m.Author != f.ID {
 		return fmt.Errorf("Wrong feed")
@@ -117,7 +121,7 @@ func (f *Feed) AddMessage(m *SignedMessage) error {
 	if err != nil {
 		return err
 	}
-	err = f.store.db.Update(func(tx *bolt.Tx) error {
+	err = f.store.db.Batch(func(tx *bolt.Tx) error {
 		FeedsBucket, err := tx.CreateBucketIfNotExists([]byte("feeds"))
 		if err != nil {
 			return err
@@ -147,6 +151,7 @@ func (f *Feed) AddMessage(m *SignedMessage) error {
 			return err
 		}
 		OwnerBucket.Put([]byte(m.Key()), []byte(m.Author))
+		// CAREFUL: Hooks must be thread safe now
 		for _, hook := range AddMessageHooks {
 			err = hook(m, tx)
 			if err != nil {
@@ -158,6 +163,7 @@ func (f *Feed) AddMessage(m *SignedMessage) error {
 	if err != nil {
 		return err
 	}
+	f.SetLatest(m)
 	f.Topic.Send <- m
 	return nil
 }
@@ -199,23 +205,37 @@ func (f *Feed) PublishMessageJSON(content json.RawMessage) error {
 	return nil
 }
 
-func (f *Feed) Latest() (m *SignedMessage) {
-	f.store.db.View(func(tx *bolt.Tx) error {
-		FeedsBucket := tx.Bucket([]byte("feeds"))
-		if FeedsBucket == nil {
-			return nil
-		}
-		FeedBucket := FeedsBucket.Bucket([]byte(f.ID))
-		if FeedBucket == nil {
-			return nil
-		}
-		cur := FeedBucket.Cursor()
-		_, val := cur.Last()
-		json.Unmarshal(val, &m)
-		return nil
-	})
-	return
+func (f *Feed) LatestCommited() (m *SignedMessage) {
+       f.store.db.View(func(tx *bolt.Tx) error {
+               FeedsBucket := tx.Bucket([]byte("feeds"))
+               if FeedsBucket == nil {
+                       return nil
+               }
+               FeedBucket := FeedsBucket.Bucket([]byte(f.ID))
+               if FeedBucket == nil {
+                       return nil
+               }
+               cur := FeedBucket.Cursor()
+               _, val := cur.Last()
+               json.Unmarshal(val, &m)
+               return nil
+       })
+       return
 }
+
+func (f *Feed) Latest() (m *SignedMessage) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	return f.last
+}
+
+func (f *Feed) SetLatest(m *SignedMessage) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.last = m
+}
+
+
 
 var ErrLogClosed = errors.New("LogClosed")
 
