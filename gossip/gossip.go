@@ -1,7 +1,7 @@
 package gossip
 
 import (
-	"runtime"
+	//"runtime"
 	"fmt"
 	"github.com/pkg/errors"
 	"time"
@@ -106,7 +106,7 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 			}
 		}()
 	}
-
+/*
 	go func() {
 		t := time.NewTicker(time.Duration(10)*time.Second)
 		for range t.C {
@@ -115,7 +115,7 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 			ds.Log.Log("gc","stop")
 		}
 	}()
-
+*/
 	go func() {
 		ssc, _ := secretstream.NewClient(*ds.PrimaryKey, sbotAppKey)
 		var pubList []*Pub
@@ -166,8 +166,10 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 }
 
 func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref) {
+	//fmt.Println("asking for", feed)
 	f := ds.GetFeed(feed)
 	if f == nil {
+		//fmt.Println("didnt get", feed)
 		return
 	}
 	reply := make(chan *ssb.SignedMessage)
@@ -184,7 +186,16 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 		close(reply)
 	}()
 	for m := range reply {
+		//fmt.Println("got")
+		// TODO: Check if this is faster than checking on the other end
+		if latest := f.Latest(); latest != nil {
+			if latest.Sequence > m.Sequence {
+				//fmt.Println("above seq")
+				continue
+			}
+		}
 		f.AddMessage(m)
+		//fmt.Println("done")
 	}
 }
 

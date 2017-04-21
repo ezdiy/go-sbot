@@ -52,7 +52,7 @@ func (m *SignedMessage) Verify(l log.Logger, latest *SignedMessage) bool {
 		l.Log("verifyerror", "fork", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
 		return false
 	}
-	return false
+	return true
 }
 
 func (m *SignedMessage) VerifySignature() error {

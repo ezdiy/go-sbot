@@ -34,7 +34,6 @@ type DataStore struct {
 	feeds    map[Ref]*Feed
 	pending map[*Feed]int
 	feedq chan *SignedMessage
-
 	Topic *MessageTopic
 
 	PrimaryKey *secrethandshake.EdKeyPair
@@ -66,13 +65,13 @@ func (ds *DataStore) DB() *bolt.DB {
 type Feed struct {
 	store *DataStore
 	ID    Ref
-	Topic *MessageTopic
 
+	Topic *MessageTopic
 	latest atomic.Value
 	queue []*SignedMessage
 }
 
-func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
+func (f *Feed) Commit(tx *bolt.Tx, feed *bolt.Bucket, n int) {
 	q := f.queue
 	ds := f.store
 	last := f.Latest()
@@ -92,6 +91,7 @@ func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
 			panic("m.Author == feed.ID invariant violation")
 		}
 		if !m.Verify(l, last) {
+			//fmt.Println("verify fail")
 			continue
 		}
 		idx = i
@@ -103,7 +103,7 @@ func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
 		err := last.VerifySignature()
 		if err != nil { // fallback
 			last = latest
-			for ;idx > 0; idx-- {
+			for ;idx >= 0; idx-- {
 				if q[idx].VerifySignature() != nil {
 					last = q[idx]
 					break
@@ -116,8 +116,7 @@ func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
 	// break above into pre-commit (parallel) and following into commit (ordered)
 	if (last != latest) {
 		f.latest.Store(last)
-		feed := feeds.Bucket([]byte(f.ID))
-		for i := 0; i < idx; i++ {
+		for i := 0; i <= idx; i++ {
 			m := q[i]
 			buf, _ := Encode(m)
 			for _, hook := range AddMessageHooks {
@@ -138,9 +137,11 @@ func (f *Feed) Commit(tx *bolt.Tx, feeds *bolt.Bucket, n int) {
 
 func (ds *DataStore) feed_collector(txint int) {
 	for {
+		//fmt.Println("ticker cycle")
 		select {
 		case m := <-ds.feedq:
 			f := ds.GetFeed(m.Author) // Sender verifies author!
+			//fmt.Println("received msg")
 			pending, _ := ds.pending[f]
 			ds.pending[f] = pending+1
 			f.queue = append(f.queue, m)
@@ -148,7 +149,10 @@ func (ds *DataStore) feed_collector(txint int) {
 			ds.db.Update(func(tx *bolt.Tx) error {
 				feeds := tx.Bucket([]byte("feeds"))
 				for f, npend := range ds.pending {
-					f.Commit(tx, feeds, npend)
+					fb, _ := feeds.CreateBucketIfNotExists([]byte(f.ID))
+					fb.FillPercent = 1
+					//fmt.Println("comm",f)
+					f.Commit(tx, fb, npend)
 					delete(ds.pending, f)
 				}
 				return nil
@@ -167,6 +171,7 @@ func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPai
 		feeds:     map[Ref]*Feed{},
 		pending:   map[*Feed]int{},
 		Topic:     NewMessageTopic(),
+		feedq:	   make(chan *SignedMessage),
 		extraData: map[string]interface{}{},
 		Keys:      map[Ref]Signer{},
 		PrimaryKey: keypair,
@@ -195,16 +200,8 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 		ds.Log.Log("feed", feedID, "error", "invalid ref")
 		return nil
 	}
-	feed := &Feed{store: ds, ID: feedID, Topic: NewMessageTopic()}
-	feed.Topic.Register(ds.Topic.Send, true)
+	feed := &Feed{store: ds, ID: feedID}
 	ds.feeds[feedID] = feed
-
-	ds.db.Update(func(tx *bolt.Tx) error {
-		feeds, _ := tx.CreateBucketIfNotExists([]byte("feeds"))
-		fb, _ := feeds.CreateBucketIfNotExists([]byte(feed.ID))
-		fb.FillPercent = 1
-		return nil
-	})
 	feed.latest.Store(feed.LatestCommited())
 	return feed
 }
@@ -241,6 +238,7 @@ func (f *Feed) PublishMessageJSON(content json.RawMessage) error {
 		Sequence:  1,
 	}
 
+	// FIXME: this is racy, the queue might be long ahead of us
 	if l := f.Latest(); l != nil {
 		key := l.Key()
 		m.Previous = &key
