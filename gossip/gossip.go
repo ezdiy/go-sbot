@@ -31,18 +31,6 @@ type PubAnnounce struct {
 }
 
 
-func AddPub(ds *ssb.DataStore, pb Pub) {
-	ds.DB().Update(func(tx *bolt.Tx) error {
-		PubBucket, err := tx.CreateBucketIfNotExists([]byte("pubs"))
-		if err != nil {
-			return err
-		}
-		buf, _ := json.Marshal(pb)
-		PubBucket.Put(pb.Link.Raw(), buf)
-		return nil
-	})
-}
-
 func init() {
 	ssb.AddMessageHooks["gossip"] = func(m *ssb.SignedMessage, tx *bolt.Tx) error {
 		_, mb := m.DecodeMessage()
