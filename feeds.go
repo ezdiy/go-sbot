@@ -77,11 +77,11 @@ func (f *Feed) Commit(tx *bolt.Tx, feed *bolt.Bucket, n int) {
 	last := f.Latest()
 	latest := last
 	var l log.Logger
-	if last == nil {
-		l = log.With(ds.Log, "commit", f.ID)
+	l = log.With(ds.Log, "commit", f.ID)
+/*	if last == nil {
 	} else {
 		l = log.With(ds.Log, "commit", f.ID, "lseq", last.Sequence, "lts", last.Timestamp, "lhash", last.Key())
-	}
+	}*/
 
 	//check hash-commited chain
 	idx := -1
@@ -131,8 +131,13 @@ func (f *Feed) Commit(tx *bolt.Tx, feed *bolt.Bucket, n int) {
 	}
 
 	//f.queue = q[n:]
-	copy(q, q[n:])
-	f.queue = q[:len(q)-n]
+
+	//copy(q, q[n:])
+	//f.queue = q[:len(q)-n]
+
+	remain := len(q) - n
+	f.queue = make([](*SignedMessage), remain)
+	copy(f.queue, q[n:])
 }
 
 func (ds *DataStore) feed_collector(txint int) {
@@ -181,6 +186,10 @@ func OpenDataStore(l *log.Logger, path string, keypair *secrethandshake.EdKeyPai
 	} else {
 		ds.Log = *l
 	}
+	ds.db.Update(func(tx *bolt.Tx) error {
+		tx.CreateBucketIfNotExists([]byte("feeds"))
+		return nil
+	})
 	ds.PrimaryRef = Ref("@" + base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:]) + ".ed25519")
 	ds.Keys[Ref("@"+base64.StdEncoding.EncodeToString(ds.PrimaryKey.Public[:])+".ed25519")] = &SignerEd25519{ed25519.PrivateKey(ds.PrimaryKey.Secret[:])}
 	if txint < 10 {
@@ -200,7 +209,8 @@ func (ds *DataStore) GetFeed(feedID Ref) *Feed {
 		ds.Log.Log("feed", feedID, "error", "invalid ref")
 		return nil
 	}
-	feed := &Feed{store: ds, ID: feedID}
+	feed := &Feed{store: ds, ID: feedID, Topic: NewMessageTopic()}
+	feed.Topic.Register(ds.Topic.Send, true)
 	ds.feeds[feedID] = feed
 	feed.latest.Store(feed.LatestCommited())
 	return feed

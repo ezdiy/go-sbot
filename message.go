@@ -37,18 +37,25 @@ func Encode(i interface{}) ([]byte, error) {
 }
 
 func (m *SignedMessage) Verify(l log.Logger, latest *SignedMessage) bool {
+	if latest != nil {
+		l = log.With(l, "lseq", latest.Sequence, "lts", latest.Timestamp, "lhash", latest.Key())
+	}
+
 	if latest == nil && m.Sequence == 1 {
 		return true
 	}
 	if m.Previous == nil && latest == nil {
 		return true
 	}
+	if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
+		l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		return false
+	}
 	if m.Previous == nil && latest != nil {
 		l.Log("verifyerror", "malformed", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
 		return false
-	} else if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
-		l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
-	} else if *m.Previous != latest.Key() {
+	}
+	if *m.Previous != latest.Key() {
 		l.Log("verifyerror", "fork", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
 		return false
 	}

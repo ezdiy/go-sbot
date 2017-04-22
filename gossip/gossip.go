@@ -189,7 +189,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 		//fmt.Println("got")
 		// TODO: Check if this is faster than checking on the other end
 		if latest := f.Latest(); latest != nil {
-			if latest.Sequence > m.Sequence {
+			if latest.Sequence >= m.Sequence {
 				//fmt.Println("above seq")
 				continue
 			}
