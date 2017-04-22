@@ -62,10 +62,9 @@ var (
 )
 
 func NewRef(typ RefType, algo RefAlgo, raw []byte) (Ref, error) {
-	if algo != RefAlgoSha256 {
+	if algo != RefAlgoSha256 && algo != RefAlgoEd25519 {
 		return "", ErrInvalidRefAlgo
 	}
-
 	if typ == RefInvalid {
 		return "", ErrInvalidRefType
 	}

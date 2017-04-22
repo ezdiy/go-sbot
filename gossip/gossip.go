@@ -83,7 +83,8 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 					continue
 				}
 				go func() {
-					caller,_ := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
+					caller,nr := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
+					fmt.Println(caller,nr)
 					lock.Lock()
 					is_client, ok := conns[caller]
 					if !ok {
@@ -150,8 +151,9 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 						netout.Log("connect", pub.Link)
 						handle(ds, conn, pub.Link)
 						conn.Close()
+						netout.Log("disconnect", pub.Link)
 					} else {
-						netout.Log("connect",pub.Link,"error", errors.Wrap(err, "dialer: can't dial"))
+						//netout.Log("connect",pub.Link,"error", errors.Wrap(err, "dialer: can't dial"))
 					}
 				} else {
 					netout.Log("connect",pub.Link,"error", errors.Wrap(err, "shs: can't build dialer"))
@@ -159,7 +161,6 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 				lock.Lock();
 				delete(conns, pub.Link)
 				lock.Unlock()
-				netout.Log("disconnect", pub.Link)
 			}()
 		}
 	}()
@@ -181,7 +182,7 @@ func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref)
 		err := mux.Source("createHistoryStream", reply,
 			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
 		if err != nil {
-			ds.Log.Log("getfeed", feed, "error", err)
+			//ds.Log.Log("getfeed", feed, "error", err)
 		}
 		close(reply)
 	}()
