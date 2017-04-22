@@ -3,7 +3,6 @@ package ssb
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"github.com/go-kit/kit/log"
@@ -24,7 +23,6 @@ type Message struct {
 }
 
 func Encode(i interface{}) ([]byte, error) {
-	//fmt.Println(i)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -48,7 +46,7 @@ func (m *SignedMessage) Verify(l log.Logger, latest *SignedMessage) bool {
 		return true
 	}
 	if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
-		l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		//l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
 		return false
 	}
 	if m.Previous == nil && latest != nil {
@@ -81,7 +79,7 @@ func (m *SignedMessage) Encode() []byte {
 
 func (m *SignedMessage) Key() Ref {
 	if m == nil {
-		return ""
+		return Ref{}
 	}
 	buf, _ := Encode(m)
 	/*enc := RemoveUnsupported(charmap.ISO8859_1.NewEncoder())
@@ -93,9 +91,10 @@ func (m *SignedMessage) Key() Ref {
 	switch strings.ToLower(m.Hash) {
 	case "sha256":
 		hash := sha256.Sum256(buf)
-		return Ref("%" + base64.StdEncoding.EncodeToString(hash[:]) + ".sha256")
+		ref, _ := NewRef(RefMessage, hash[:], RefAlgoSha256)
+		return ref
 	}
-	return ""
+	return Ref{}
 }
 
 func (m *Message) Sign(s Signer) *SignedMessage {

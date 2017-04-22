@@ -38,7 +38,7 @@ func AddPub(ds *ssb.DataStore, pb Pub) {
 			return err
 		}
 		buf, _ := json.Marshal(pb)
-		PubBucket.Put([]byte(pb.Link), buf)
+		PubBucket.Put(pb.Link.Raw(), buf)
 		return nil
 	})
 }
@@ -52,7 +52,7 @@ func init() {
 				return err
 			}
 			buf, _ := json.Marshal(mbp.Pub)
-			PubBucket.Put([]byte(mbp.Pub.Link), buf)
+			PubBucket.Put(mbp.Pub.Link.DBKey(), buf)
 			return nil
 		}
 		return nil
@@ -83,7 +83,7 @@ func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) 
 					continue
 				}
 				go func() {
-					caller,nr := ssb.NewRef(ssb.RefFeed, ssb.RefAlgoEd25519, conn.(secretstream.Conn).GetRemote())
+					caller,nr := ssb.NewRef(ssb.RefFeed, conn.(secretstream.Conn).GetRemote(), ssb.RefAlgoEd25519)
 					fmt.Println(caller,nr)
 					lock.Lock()
 					is_client, ok := conns[caller]
@@ -214,7 +214,7 @@ func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
 			Seq  int     `json:"seq"`
 			Live bool    `json:"live"`
 		}{
-			"",
+			ssb.Ref{},
 			0,
 			false,
 		}
