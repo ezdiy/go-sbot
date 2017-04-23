@@ -36,6 +36,7 @@ type Peer struct {
 	Id ssb.Ref
 	g  *Gossip
 	lastmsg  int64
+	is_ok bool
 }
 
 type PubInfo struct {
@@ -121,6 +122,9 @@ func (g *Gossip) NewPeer(conn net.Conn, cid ssb.Ref) bool {
 		p.Handle()
 		g.Lock()
 		delete(g.Peers, cid.Data)
+		if !p.is_ok {
+			g.MarkFail(cid.Data)
+		}
 		g.Unlock()
 		g.Store.Log.Log("gossip","peer","disconnect", cid)
 	}()
@@ -128,6 +132,13 @@ func (g *Gossip) NewPeer(conn net.Conn, cid ssb.Ref) bool {
 	return false
 }
 
+func (g *Gossip) MarkFail(id string) {
+	now := time.Now().Unix()
+	if pub, ok := g.Pubs[id]; ok {
+		pub.backoff = (pub.backoff + 1) * 2
+		pub.lastfail = now
+	}
+}
 
 func (g *Gossip) Client() {
 	netout := log.With(g.Store.Log, "gossip", "client")
@@ -192,8 +203,9 @@ func (g *Gossip) Client() {
 
 	if err != nil {
 //		netout.Log("connect", pub.Link, "error", err)
-		candidate.backoff = (candidate.backoff + 1) * 2
-		candidate.lastfail = now
+		g.Lock()
+		g.MarkFail(pub.Link.Data)
+		g.Unlock()
 		continue
 	}
 	oconn.SetDeadline(time.Time{})
@@ -229,6 +241,7 @@ func (p *Peer) FetchFeed(feed ssb.Ref) {
 			}
 		}
 		p.lastmsg = time.Now().Unix()
+		p.is_ok = true
 		f.AddMessage(m)
 	}
 }
@@ -285,6 +298,7 @@ func DefaultHandler(p *Peer) {
 					break
 				}
 				p.lastmsg = time.Now().Unix()
+				p.is_ok = true
 				c <- m
 			}
 			close(c)
