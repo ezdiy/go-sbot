@@ -42,6 +42,7 @@ type PubInfo struct {
 	*Pub
 	backoff  int64
 	lastfail int64
+	lastgood int64
 }
 
 type Gossip struct {
@@ -64,8 +65,10 @@ func (g *Gossip) Setup() {
 	}
 	g.Peers = make(map[string]*Peer)
 	g.Pubs = make(map[string]*PubInfo)
+	if (g.Limit == 0) { g.Limit = 20 }
+	if (g.Tick == 0) { g.Tick = 1 }
 	if (g.Idle == 0) { g.Idle = 600 }
-	if (g.Timeout == 0) { g.Idle = 15 }
+	if (g.Timeout == 0) { g.Timeout = 2 }
 }
 
 func (g *Gossip) Server() error {
@@ -95,7 +98,6 @@ func (g *Gossip) Server() error {
 		if g.NewPeer(conn, cid) {
 			netin.Log("already", cid)
 		}
-		netin.Log("disconnect", cid)
 	}()
 	}
 	return nil
@@ -115,11 +117,14 @@ func (g *Gossip) NewPeer(conn net.Conn, cid ssb.Ref) bool {
 	p.Client = muxrpc.NewClient(g.Store.Log, conn)
 	g.Handle(p)
 
-	go p.Handle()
+	go func() {
+		p.Handle()
+		g.Lock()
+		delete(g.Peers, cid.Data)
+		g.Unlock()
+		g.Store.Log.Log("gossip","peer","disconnect", cid)
+	}()
 
-	g.Lock()
-	delete(g.Peers, cid.Data)
-	g.Unlock()
 	return false
 }
 
@@ -129,7 +134,8 @@ func (g *Gossip) Client() {
 	ssc, _ := secretstream.NewClient(*g.Store.PrimaryKey, sbotAppKey)
 	last := int64(0)
 
-	for {
+	for step:=0;true;step++ {
+	//println("tick")
 	time.Sleep(time.Duration(g.Tick) * time.Second)
 	now := time.Now().Unix()
 
@@ -138,17 +144,24 @@ func (g *Gossip) Client() {
 		g.UpdatePubs()
 	}
 
-	var candidate *PubInfo
+	var candidate *PubInfo = nil
 	cn := now
-	for _, v := range g.Pubs {
-		vt := v.lastfail + v.backoff
+	g.Lock()
+	for id, v := range g.Pubs {
+		var vt int64
+		if _, ok := g.Peers[id]; ok {
+			continue
+		}
+		if (step%2 == 0) {
+			vt = v.lastfail + v.backoff
+		} else {
+			vt = v.lastgood
+		}
 		if (vt < cn) {
 			candidate = v
 			cn = vt
 		}
 	}
-
-	g.Lock()
 	if (len(g.Peers) > g.Limit) {
 		for _, v := range g.Peers {
 			if (v.lastmsg + int64(g.Idle) < now) {
@@ -159,23 +172,34 @@ func (g *Gossip) Client() {
 	}
 
 	g.Unlock()
+
+	if candidate == nil {
+		continue
+	}
+
 	pub := candidate.Pub
 	number := fmt.Sprintf("%s:%d", pub.Host, pub.Port)
 	key := pub.Link.Raw()
 	var pk [32]byte
 	copy(pk[:], key)
+	//fmt.Println("dialing", number)
 	conn, err := net.DialTimeout("tcp", number, time.Duration(g.Timeout) * time.Second)
+	oconn := conn
 	if err == nil {
+		conn.SetDeadline(time.Now().Add(time.Duration(g.Timeout) * time.Second))
 		conn, err = ssc.Dial2(pk, conn)
 	}
 
 	if err != nil {
-		netout.Log("connect", pub.Link, "error", err)
+//		netout.Log("connect", pub.Link, "error", err)
 		candidate.backoff = (candidate.backoff + 1) * 2
 		candidate.lastfail = now
 		continue
 	}
+	oconn.SetDeadline(time.Time{})
 	candidate.backoff = 0
+	candidate.lastfail = 0
+	candidate.lastgood = now
 
 	netout.Log("connect", pub.Link)
 	g.NewPeer(conn, pub.Link)
@@ -183,6 +207,7 @@ func (g *Gossip) Client() {
 }
 
 func (p *Peer) FetchFeed(feed ssb.Ref) {
+	//fmt.Println("fetching",feed)
 	f := p.g.Store.GetFeed(feed)
 	if f == nil {
 		return
@@ -250,6 +275,7 @@ func DefaultHandler(p *Peer) {
 		}
 		args := []interface{}{&params}
 		json.Unmarshal(rm, &args)
+		//fmt.Println("getting feed", params.Id)
 		f := p.g.Store.GetFeed(params.Id)
 		c := make(chan interface{})
 		go func() {
