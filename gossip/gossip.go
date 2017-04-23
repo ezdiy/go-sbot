@@ -139,6 +139,20 @@ func (g *Gossip) MarkFail(id string) {
 		pub.lastfail = now
 	}
 }
+func (p *Peer) MarkOK() {
+	now := time.Now().Unix()
+	p.lastmsg = now
+	if (p.is_ok) {
+		return
+	}
+	p.g.Lock()
+	p.is_ok = true
+	if pub, ok := p.g.Pubs[p.Id.Data]; ok {
+		pub.backoff = 0
+		pub.lastfail = 0
+	}
+	p.g.Unlock()
+}
 
 func (g *Gossip) Client() {
 	netout := log.With(g.Store.Log, "gossip", "client")
@@ -209,8 +223,6 @@ func (g *Gossip) Client() {
 		continue
 	}
 	oconn.SetDeadline(time.Time{})
-	candidate.backoff = 0
-	candidate.lastfail = 0
 	candidate.lastgood = now
 
 	netout.Log("connect", pub.Link)
@@ -240,8 +252,7 @@ func (p *Peer) FetchFeed(feed ssb.Ref) {
 				continue
 			}
 		}
-		p.lastmsg = time.Now().Unix()
-		p.is_ok = true
+		p.MarkOK()
 		f.AddMessage(m)
 	}
 }
@@ -297,8 +308,7 @@ func DefaultHandler(p *Peer) {
 				if (p.IsClosed()) {
 					break
 				}
-				p.lastmsg = time.Now().Unix()
-				p.is_ok = true
+				p.MarkOK()
 				c <- m
 			}
 			close(c)
