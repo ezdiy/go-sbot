@@ -75,37 +75,45 @@ type Pointer struct {
 	Sequence int
 }
 
+/*
+var known map[string]bool
+
+func init() {
+	known = make(map[string]bool)
+}
+*/
+
 func (f *Feed) Commit(tx *bolt.Tx, dbfeeds *bolt.Bucket, dblog *bolt.Bucket, dbptr *bolt.Bucket, n int) {
 	q := f.queue
-	ds := f.store
 	last := f.Latest()
 	latest := last
 	var l log.Logger
-	l = log.With(ds.Log, "commit", f.ID)
-/*	if last == nil {
-	} else {
-		l = log.With(ds.Log, "commit", f.ID, "lseq", last.Sequence, "lts", last.Timestamp, "lhash", last.Key())
-	}*/
+	//l = log.With(ds.Log, "commit", f.ID)
 
 	//check hash-commited chain
 	idx := -1
+	delta := 0
 	for i := 0; i < n; i++ {
 		m := q[i]
 		if (m.Author != f.ID) {
 			panic("m.Author == feed.ID invariant violation")
 		}
-		if !m.Verify(l, last) {
-			//fmt.Println("verify fail")
+		if m.Verify(last) < 0 {
+			delta++ // omit
 			continue
 		}
-		idx = i
+		idx = i-delta
+		q[idx] = m
 		last = m
 	}
+	n -= delta
 
 	//now tip sig
 	if (last != latest) {
 		err := last.VerifySignature()
-		if err != nil { // fallback
+		if err != nil { // fallbacka
+			f.store.Log.Log("hashfail", last.Author, "seq", last.Sequence)
+			//fmt.Println("fork; retracing")
 			last = latest
 			for ;idx >= 0; idx-- {
 				if q[idx].VerifySignature() != nil {
@@ -113,6 +121,7 @@ func (f *Feed) Commit(tx *bolt.Tx, dbfeeds *bolt.Bucket, dblog *bolt.Bucket, dbp
 					break
 				}
 			}
+			f.store.Log.Log("rollback", last.Author, "seq", last.Sequence)
 		}
 	}
 
@@ -128,6 +137,14 @@ func (f *Feed) Commit(tx *bolt.Tx, dbfeeds *bolt.Bucket, dblog *bolt.Bucket, dbp
 			m := q[i]
 			buf, _ := Encode(m)
 			if (m.Sequence == 1) {
+				/*
+				if (known[m.Author.String()]) {
+					for x, y := range(q) {
+						fmt.Println(x,y.Sequence)
+					}
+					panic("db inconsistent"+f.ID.String())
+				}
+				known[m.Author.String()] = true*/
 				f.store.Log.Log("newfeed", m.Author)
 			}
 

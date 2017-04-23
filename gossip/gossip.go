@@ -1,9 +1,9 @@
+// TODO: better err handling
+
 package gossip
 
 import (
-	//"runtime"
 	"fmt"
-	"github.com/pkg/errors"
 	"time"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +18,7 @@ import (
 	"github.com/ezdiy/go-muxrpc"
 	"github.com/go-kit/kit/log"
 )
+var sbotAppKey, _ = base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 
 type Pub struct {
 	Host string  `json:"host"`
@@ -30,6 +31,250 @@ type PubAnnounce struct {
 	Pub Pub `json:"address"`
 }
 
+type Peer struct {
+	*muxrpc.Client
+	Id ssb.Ref
+	g  *Gossip
+	lastmsg  int64
+}
+
+type PubInfo struct {
+	*Pub
+	backoff  int64
+	lastfail int64
+}
+
+type Gossip struct {
+	Store *ssb.DataStore
+	Addr  string
+	Peers map[string]*Peer
+	Pubs  map[string]*PubInfo
+	Handle Handler
+	Tick  int
+	Idle  int
+	Limit int
+	Timeout int
+
+	sync.Mutex
+}
+
+func (g *Gossip) Setup() {
+	if g.Handle == nil {
+		g.Handle = DefaultHandler
+	}
+	g.Peers = make(map[string]*Peer)
+	g.Pubs = make(map[string]*PubInfo)
+	if (g.Idle == 0) { g.Idle = 600 }
+	if (g.Timeout == 0) { g.Idle = 15 }
+}
+
+func (g *Gossip) Server() error {
+	netin := log.With(g.Store.Log, "gossip", "server")
+
+	addr := g.Addr
+	if (addr == "") {
+		addr = "0.0.0.0:8008"
+	}
+
+	sss, _ := secretstream.NewServer(*g.Store.PrimaryKey, sbotAppKey)
+	listener, err := sss.Listen("tcp", addr)
+	if err != nil {
+		netin.Log("listen", addr, "error", err)
+		return err
+	}
+	netin.Log("listen", addr)
+
+	for {
+	conn, err := listener.Accept()
+	if err != nil {
+		continue
+	}
+	go func() {
+		cid, _ := ssb.NewRef(ssb.RefFeed, conn.(secretstream.Conn).GetRemote(), ssb.RefAlgoEd25519)
+		netin.Log("accept", cid)
+		if g.NewPeer(conn, cid) {
+			netin.Log("already", cid)
+		}
+		netin.Log("disconnect", cid)
+	}()
+	}
+	return nil
+}
+
+func (g *Gossip) NewPeer(conn net.Conn, cid ssb.Ref) bool {
+	g.Lock()
+	if _, ok := g.Peers[cid.Data]; ok  {
+		g.Unlock()
+		return true
+	}
+
+	p := &Peer{Id: cid, g: g}
+	g.Peers[cid.Data] = p
+	g.Unlock()
+
+	p.Client = muxrpc.NewClient(g.Store.Log, conn)
+	g.Handle(p)
+
+	go p.Handle()
+
+	g.Lock()
+	delete(g.Peers, cid.Data)
+	g.Unlock()
+	return false
+}
+
+
+func (g *Gossip) Client() {
+	netout := log.With(g.Store.Log, "gossip", "client")
+	ssc, _ := secretstream.NewClient(*g.Store.PrimaryKey, sbotAppKey)
+	last := int64(0)
+
+	for {
+	time.Sleep(time.Duration(g.Tick) * time.Second)
+	now := time.Now().Unix()
+
+	if last + 30 < now {
+		last = now
+		g.UpdatePubs()
+	}
+
+	var candidate *PubInfo
+	cn := now
+	for _, v := range g.Pubs {
+		vt := v.lastfail + v.backoff
+		if (vt < cn) {
+			candidate = v
+			cn = vt
+		}
+	}
+
+	g.Lock()
+	if (len(g.Peers) > g.Limit) {
+		for _, v := range g.Peers {
+			if (v.lastmsg + int64(g.Idle) < now) {
+				v.Close()
+				// handle will delete the peer for us
+			}
+		}
+	}
+
+	g.Unlock()
+	pub := candidate.Pub
+	number := fmt.Sprintf("%s:%d", pub.Host, pub.Port)
+	key := pub.Link.Raw()
+	var pk [32]byte
+	copy(pk[:], key)
+	conn, err := net.DialTimeout("tcp", number, time.Duration(g.Timeout) * time.Second)
+	if err == nil {
+		conn, err = ssc.Dial2(pk, conn)
+	}
+
+	if err != nil {
+		netout.Log("connect", pub.Link, "error", err)
+		candidate.backoff = (candidate.backoff + 1) * 2
+		candidate.lastfail = now
+		continue
+	}
+	candidate.backoff = 0
+
+	netout.Log("connect", pub.Link)
+	g.NewPeer(conn, pub.Link)
+	}
+}
+
+func (p *Peer) FetchFeed(feed ssb.Ref) {
+	f := p.g.Store.GetFeed(feed)
+	if f == nil {
+		return
+	}
+	reply := make(chan *ssb.SignedMessage)
+	seq := 0
+	if m := f.Latest(); m != nil {
+		seq = m.Sequence + 1
+	}
+	go func() {
+		p.Source("createHistoryStream", reply,
+			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
+		close(reply)
+	}()
+	for m := range reply {
+		if latest := f.Latest(); latest != nil {
+			if latest.Sequence >= m.Sequence {
+				continue
+			}
+		}
+		p.lastmsg = time.Now().Unix()
+		f.AddMessage(m)
+	}
+}
+
+func (p *Peer) FetchFollowedFeeds() {
+	for feed := range graph.GetMultiFollows(p.g.Store, map[ssb.Ref]int{p.Id:0, p.g.Store.PrimaryRef:0}, 2) {
+		go p.FetchFeed(feed)
+	}
+}
+
+func (g *Gossip) UpdatePubs() {
+	g.Lock()
+	g.Store.DB().View(func(tx *bolt.Tx) error {
+		PubBucket := tx.Bucket([]byte("pubs"))
+		if PubBucket == nil {
+			return nil
+		}
+		PubBucket.ForEach(func(k, v []byte) error {
+			var pd *Pub
+			json.Unmarshal(v, &pd)
+			if _, ok := g.Pubs[pd.Link.Data]; !ok {
+				g.Pubs[pd.Link.Data] = &PubInfo{Pub: pd}
+			}
+			return nil
+		})
+		return nil
+	})
+	g.Unlock()
+	return
+}
+
+////////////////////////////////////////////////////////////////////////////////
+type Handler func(p *Peer)
+func DefaultHandler(p *Peer) {
+	p.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
+		params := struct {
+			Id   ssb.Ref `json:"id"`
+			Seq  int     `json:"seq"`
+			Live bool    `json:"live"`
+		}{
+			ssb.Ref{},
+			0,
+			false,
+		}
+		args := []interface{}{&params}
+		json.Unmarshal(rm, &args)
+		f := p.g.Store.GetFeed(params.Id)
+		c := make(chan interface{})
+		go func() {
+			for m := range f.Log(params.Seq, params.Live) {
+				// opportunistic shortcut
+				if (p.IsClosed()) {
+					break
+				}
+				p.lastmsg = time.Now().Unix()
+				c <- m
+			}
+			close(c)
+		}()
+		return c
+	})
+	p.FetchFollowedFeeds()
+}
+
+
+func Replicate(ds *ssb.DataStore, addr string) {
+	gs := &Gossip{Store: ds, Addr: addr}
+	gs.Setup()
+	go gs.Server()
+	gs.Client()
+}
 
 func init() {
 	ssb.AddMessageHooks["gossip"] = func(m *ssb.SignedMessage, tx *bolt.Tx) error {
@@ -50,201 +295,4 @@ func init() {
 	}
 }
 
-type Handler func(*ssb.DataStore, net.Conn, ssb.Ref)
-func Gossip(ds *ssb.DataStore, addr string, handle Handler, cps int, limit int) {
-	var lock  sync.Mutex
-	netin := log.With(ds.Log, "gossip", "incoming")
-	netout := log.With(ds.Log, "gossip", "outgoing")
-
-	// maps pub -> didweinitiate?
-	conns := make(map[ssb.Ref]bool)
-	sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
-
-	if addr != "" {
-		go func() {
-			sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
-			listener, _ := sss.Listen("tcp", addr)
-			netin.Log("Listening on ",addr)
-			for {
-				conn, err := listener.Accept()
-				if err != nil {
-					continue
-				}
-				go func() {
-					caller,nr := ssb.NewRef(ssb.RefFeed, conn.(secretstream.Conn).GetRemote(), ssb.RefAlgoEd25519)
-					fmt.Println(caller,nr)
-					lock.Lock()
-					is_client, ok := conns[caller]
-					if !ok {
-						conns[caller] = false
-					}
-					lock.Unlock()
-					defer conn.Close()
-					if ok && is_client {
-						netin.Log("already", caller)
-						return
-					} else {
-						netin.Log("accept", caller)
-						handle(ds, conn, caller)
-					}
-					lock.Lock()
-					delete(conns, caller)
-					lock.Unlock()
-					netin.Log("disconnect", caller)
-				}()
-			}
-		}()
-	}
-/*
-	go func() {
-		t := time.NewTicker(time.Duration(10)*time.Second)
-		for range t.C {
-			ds.Log.Log("gc","start")
-			runtime.GC()
-			ds.Log.Log("gc","stop")
-		}
-	}()
-*/
-	go func() {
-		ssc, _ := secretstream.NewClient(*ds.PrimaryKey, sbotAppKey)
-		var pubList []*Pub
-		t := time.NewTicker(time.Duration(cps)*time.Second)
-		for range t.C {
-			if len(conns) > limit {
-				continue
-			}
-			if len(pubList) == 0 {
-				pubList = GetPubs(ds)
-			}
-			if len(pubList) == 0 {
-				continue
-			}
-
-			pub := pubList[0]
-			pubList = pubList[1:]
-			var pubKey [32]byte
-			rawpubKey := pub.Link.Raw()
-			copy(pubKey[:], rawpubKey)
-
-			go func() {
-				lock.Lock();
-				_, ok := conns[pub.Link]
-				if !ok { conns[pub.Link] = true }
-				lock.Unlock()
-				if ok { return }
-				d, err := ssc.NewDialer(pubKey)
-				if err == nil {
-					conn, err := d("tcp", fmt.Sprintf("%s:%d", pub.Host, pub.Port))
-					if err == nil {
-						netout.Log("connect", pub.Link)
-						handle(ds, conn, pub.Link)
-						conn.Close()
-						netout.Log("disconnect", pub.Link)
-					} else {
-						//netout.Log("connect",pub.Link,"error", errors.Wrap(err, "dialer: can't dial"))
-					}
-				} else {
-					netout.Log("connect",pub.Link,"error", errors.Wrap(err, "shs: can't build dialer"))
-				}
-				lock.Lock();
-				delete(conns, pub.Link)
-				lock.Unlock()
-			}()
-		}
-	}()
-}
-
-func get_feed(ds *ssb.DataStore, mux *muxrpc.Client, feed ssb.Ref, peer ssb.Ref) {
-	//fmt.Println("asking for", feed)
-	f := ds.GetFeed(feed)
-	if f == nil {
-		//fmt.Println("didnt get", feed)
-		return
-	}
-	reply := make(chan *ssb.SignedMessage)
-	seq := 0
-	if m := f.Latest(); m != nil {
-		seq = m.Sequence + 1
-	}
-	go func() {
-		err := mux.Source("createHistoryStream", reply,
-			map[string]interface{}{"id": f.ID, "seq": seq, "live": true, "keys": false})
-		if err != nil {
-			//ds.Log.Log("getfeed", feed, "error", err)
-		}
-		close(reply)
-	}()
-	for m := range reply {
-		//fmt.Println("got")
-		// TODO: Check if this is faster than checking on the other end
-		if latest := f.Latest(); latest != nil {
-			if latest.Sequence >= m.Sequence {
-				//fmt.Println("above seq")
-				continue
-			}
-		}
-		f.AddMessage(m)
-		//fmt.Println("done")
-	}
-}
-
-func AskForFeeds(ds *ssb.DataStore, mux *muxrpc.Client, peer ssb.Ref) {
-	for feed := range graph.GetMultiFollows(ds, map[ssb.Ref]int{peer:0, ds.PrimaryRef:0}, 2) {
-		go get_feed(ds, mux, feed, peer)
-	}
-}
-
-func InitMux(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) *muxrpc.Client {
-	mux := muxrpc.NewClient(ds.Log, conn)
-	mux.HandleSource("createHistoryStream", func(rm json.RawMessage) chan interface{} {
-		params := struct {
-			Id   ssb.Ref `json:"id"`
-			Seq  int     `json:"seq"`
-			Live bool    `json:"live"`
-		}{
-			ssb.Ref{},
-			0,
-			false,
-		}
-		args := []interface{}{&params}
-		json.Unmarshal(rm, &args)
-		f := ds.GetFeed(params.Id)
-		c := make(chan interface{})
-		go func() {
-			for m := range f.Log(params.Seq, params.Live) {
-				c <- m
-			}
-		}()
-		return c
-	})
-	return mux
-}
-
-func Replicator(ds *ssb.DataStore, conn net.Conn, peer ssb.Ref) {
-	mux := InitMux(ds, conn, peer)
-	AskForFeeds(ds, mux, peer)
-	mux.Handle()
-}
-
-
-func GetPubs(ds *ssb.DataStore) (pds []*Pub) {
-	ds.DB().View(func(tx *bolt.Tx) error {
-		PubBucket := tx.Bucket([]byte("pubs"))
-		if PubBucket == nil {
-			return nil
-		}
-		PubBucket.ForEach(func(k, v []byte) error {
-			var pd *Pub
-			json.Unmarshal(v, &pd)
-			pds = append(pds, pd)
-			return nil
-		})
-		return nil
-	})
-	return
-}
-
-func Replicate(ds *ssb.DataStore, addr string) {
-	Gossip(ds, addr, Replicator, 1, 100)
-}
 

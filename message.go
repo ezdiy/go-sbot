@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"strings"
-	"github.com/go-kit/kit/log"
+	//"github.com/go-kit/kit/log"
 )
 
 type SignedMessage struct {
@@ -34,30 +34,26 @@ func Encode(i interface{}) ([]byte, error) {
 	return bytes.Trim(buf.Bytes(), "\n"), nil
 }
 
-func (m *SignedMessage) Verify(l log.Logger, latest *SignedMessage) bool {
-	if latest != nil {
-		l = log.With(l, "lseq", latest.Sequence, "lts", latest.Timestamp, "lhash", latest.Key())
-	}
-
+func (m *SignedMessage) Verify(latest *SignedMessage) int {
 	if latest == nil && m.Sequence == 1 {
-		return true
+		return 0
 	}
 	if m.Previous == nil && latest == nil {
-		return true
+		return 0
 	}
 	if m.Sequence != latest.Sequence+1 || m.Timestamp <= latest.Timestamp {
 		//l.Log("verifyerror", "sequence", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
-		return false
+		return -1
 	}
 	if m.Previous == nil && latest != nil {
-		l.Log("verifyerror", "malformed", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
-		return false
+		//l.Log("verifyerror", "malformed", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		return -2
 	}
 	if *m.Previous != latest.Key() {
-		l.Log("verifyerror", "fork", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
-		return false
+		//l.Log("verifyerror", "fork", "seq", m.Sequence, "ts", m.Timestamp, "prev", m.Previous)
+		return -3
 	}
-	return true
+	return 0
 }
 
 func (m *SignedMessage) VerifySignature() error {
@@ -70,6 +66,14 @@ func (m *SignedMessage) VerifySignature() error {
 		return err
 	}
 	return nil
+}
+
+func (m *SignedMessage) Same(x *SignedMessage) bool {
+	if m == nil {
+		return x == m
+	} else {
+		return m.Sequence == x.Sequence
+	}
 }
 
 func (m *SignedMessage) Encode() []byte {
