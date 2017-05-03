@@ -149,12 +149,13 @@ func init() {
 
 }
 
-func Replicate(ds *ssb.DataStore) {
+func Replicate(ds *ssb.DataStore, addr string) {
+	if (addr == "") { addr = ":8008" }
 	sbotAppKey, _ := base64.StdEncoding.DecodeString("1KHLiKZvAvjbY1ziZEHMXawbCEIM6qwjCDm3VYRan/s=")
 	go func() {
 
 		sss, _ := secretstream.NewServer(*ds.PrimaryKey, sbotAppKey)
-		l, err := sss.Listen("tcp", ":8008")
+		l, err := sss.Listen("tcp", addr)
 		if err != nil {
 			fmt.Println(err)
 			return
